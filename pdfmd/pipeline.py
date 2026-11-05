@@ -24,6 +24,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional, List, Dict
 import os
+import sys
+import tempfile
 
 try:
     import fitz  # PyMuPDF
@@ -210,6 +212,24 @@ def pdf_to_markdown(
     if fitz is None:
         raise RuntimeError("PyMuPDF (fitz) is not installed. Install with: pip install pymupdf")
 
+    to_stdout = output_md == "-"
+    out_path = Path(output_md)
+    if to_stdout and options.export_images:
+        raise ValueError("Image export requires a Markdown file, not stdout.")
+    if not to_stdout:
+        source = Path(input_pdf)
+        if out_path.resolve() == source.resolve() or (
+            out_path.exists() and source.exists() and out_path.samefile(source)
+        ):
+            raise ValueError("Output must not replace the input PDF.")
+        if out_path.is_symlink() or (out_path.exists() and not options.overwrite_existing):
+            raise FileExistsError(f"Output already exists: {out_path}. Use --overwrite to replace it.")
+        assets = out_path.with_name(out_path.stem + "_assets")
+        if options.export_images and (assets.is_symlink() or (assets.exists() and not assets.is_dir())):
+            raise ValueError(f"Image assets must be a real directory: {assets}")
+        if options.export_images and assets.exists() and not options.overwrite_existing:
+            raise FileExistsError(f"Image assets already exist: {assets}. Use --overwrite to replace them.")
+
     # --- Stage 1: Extract ---
     if log_cb:
         log_cb("[pipeline] Extracting text…")
@@ -267,16 +287,31 @@ def pdf_to_markdown(
         if log_cb:
             log_cb("[pipeline] Exporting images…")
         
-        page_to_rel = _export_images(
-            input_pdf,
-            output_md,
-            options,
-            log_cb=log_cb,
-            pdf_password=pdf_password,
-        )
-        
-        if page_to_rel:
-            md = _append_image_refs(md, page_to_rel)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".pdfmd-images-", dir=out_path.parent) as stage:
+            staged_output = Path(stage) / out_path.name
+            page_to_rel = _export_images(
+                input_pdf, str(staged_output), options,
+                log_cb=log_cb, pdf_password=pdf_password,
+            )
+            if page_to_rel:
+                staged_assets = staged_output.with_name(staged_output.stem + "_assets")
+                assets = out_path.with_name(out_path.stem + "_assets")
+                if assets.is_symlink():
+                    raise ValueError(f"Image assets must be a real directory: {assets}")
+                if options.overwrite_existing and assets.is_dir():
+                    for image in staged_assets.iterdir():
+                        os.replace(image, assets / image.name)
+                else:
+                    if assets.exists():
+                        raise FileExistsError(f"Image assets already exist: {assets}. Use --overwrite to replace them.")
+                    try:
+                        os.rename(staged_assets, assets)
+                    except OSError as exc:
+                        if assets.exists():
+                            raise FileExistsError(f"Image assets already exist: {assets}") from exc
+                        raise
+                md = _append_image_refs(md, page_to_rel)
 
     if progress_cb:
         progress_cb(90, 100)
@@ -286,7 +321,27 @@ def pdf_to_markdown(
         log_cb("[pipeline] Writing output file…")
     
     try:
-        Path(output_md).write_text(md, encoding="utf-8")
+        if to_stdout:
+            sys.stdout.write(md)
+        else:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            # Publish only complete Markdown. Hard-link creation cannot clobber
+            # a file another conversion created after the preflight check.
+            temp_name = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=out_path.parent,
+                    prefix=".pdfmd-", suffix=".tmp", delete=False,
+                ) as temp:
+                    temp_name = temp.name
+                    temp.write(md)
+                if options.overwrite_existing:
+                    os.replace(temp_name, out_path)
+                else:
+                    os.link(temp_name, out_path)
+            finally:
+                if temp_name and os.path.exists(temp_name):
+                    os.unlink(temp_name)
     except Exception as e:
         if log_cb:
             log_cb(f"[pipeline] Error writing output: {e}")
