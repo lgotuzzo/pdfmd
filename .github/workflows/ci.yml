@@ -23,7 +23,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       # EDIT (1): pick ONE install path:
-      - run: pip install -e '.[dev]'            # has pyproject/setup with a dev extra
+      - name: Install OCR test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-spa fonts-dejavu-core
+      - run: pip install -e '.[dev,ocr]'            # has pyproject/setup with a dev extra
       # - run: pip install -r requirements.txt  # requirements-only repos
       # Lint is ADVISORY until the tree is clean; then DELETE continue-on-error to gate.
       # ruff is installed here so the step reports real findings instead of failing on a missing

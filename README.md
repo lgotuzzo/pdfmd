@@ -1,5 +1,10 @@
 # PDF to Markdown Converter (pdfmd)
 
+**Fork para uso local en CachyOS/KDE:** [instalación y uso en español](doc/CachyOS.md).
+Versión 1.7.0: protección de archivos existentes, salida stdout, OCR por página,
+perfil español, referencias al PDF y menú contextual de Dolphin.
+La interfaz de escritorio conserva Tkinter y añade el perfil «Español (CachyOS)».
+
 **A refined, privacy-first desktop and CLI tool that converts PDFs — including scanned documents — into clean, structured Markdown. Built for researchers, professionals, and creators who demand accuracy, speed, and absolute data privacy.**
 
 **Fast. Local. Intelligent. Fully offline.**
@@ -7,7 +12,7 @@
 ![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-![Version](https://img.shields.io/badge/version-1.6.0-purple)
+![Version](https://img.shields.io/badge/version-1.7.0-purple)
 
 ---
 
@@ -1167,16 +1172,17 @@ In the GUI, batch conversion processes files sequentially but with scaled progre
 
 | Platform | Primary OCR | Fallback | Notes |
 |----------|-------------|----------|-------|
-| **Windows** | Tesseract | Native PyMuPDF | Fast, lightweight |
-| **macOS** | OCRmyPDF | Tesseract | Best layout preservation |
-| **Linux** | OCRmyPDF | Tesseract | Ideal for servers |
+| **Windows** | Tesseract | Explicit `--ocr ocrmypdf` | Automatic mode uses page-by-page OCR |
+| **macOS** | Tesseract | Explicit `--ocr ocrmypdf` | Automatic mode preserves digital text |
+| **Linux** | Tesseract | Explicit `--ocr ocrmypdf` | Install the selected language data |
 
 **Scanned PDF Detection:**
 
-The `auto` mode analyses the first 3 pages for:
+The `auto` mode evaluates every processed page independently for:
 - Text density (< 50 chars/page = likely scanned)
 - Large images covering >30% of page area
-- Combined low text + high image coverage triggers OCR
+- Low native text plus large placed images triggers OCR only on that page
+- Missing OCR dependencies/languages cause a visible error instead of a blank success
 
 ---
 

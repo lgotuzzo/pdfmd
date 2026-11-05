@@ -151,13 +151,15 @@ def _defragment_orphans(md: str, max_len: int = 45) -> str:
             and 0 < len(line.strip()) <= max_len
             and not line.strip().startswith("#")
             and not _is_thematic_break(line)
+            and not line.strip().startswith("<!-- pdfmd:page=")
         ):
             # Attach orphan to the previous non-blank line — unless that line is a
             # thematic break (page-break rule), which must stay a standalone rule.
             j = len(res) - 1
             while j >= 0 and not res[j].strip():
                 j -= 1
-            if j >= 0 and not _is_thematic_break(res[j]):
+            if (j >= 0 and not _is_thematic_break(res[j])
+                    and not res[j].strip().startswith("<!-- pdfmd:page=")):
                 res[j] = (res[j].rstrip() + " " + line.strip()).strip()
                 i += 2
                 continue
@@ -561,6 +563,8 @@ def render_document(
     total = len(pages)
 
     for i, page in enumerate(pages):
+        if options.insert_page_numbers:
+            md_lines.extend([f"<!-- pdfmd:page={i + 1} -->", ""])
         body = body_sizes[i] if body_sizes and i < len(body_sizes) else 11.0
 
         for blk in page.blocks:

@@ -103,6 +103,12 @@ DEFAULT_OPTIONS = {
 
 BUILTIN_PROFILES = {
     "Default": DEFAULT_OPTIONS,
+    "Español (CachyOS)": {
+        **DEFAULT_OPTIONS,
+        "ocr_mode": "auto",
+        "ocr_lang": "spa+eng",
+        "page_breaks": True,
+    },
     "Academic article": {
         "ocr_mode": "auto",
         "preview": False,

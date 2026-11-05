@@ -11,8 +11,8 @@ list of `PageText` objects for the given PDF. It supports three modes:
 
 The chosen path is controlled by `Options.ocr_mode`:
   "off" | "auto" | "tesseract" | "ocrmypdf".
-When set to "auto", a quick probe examines the first few pages and switches to
-OCR if the doc appears scanned.
+When set to "auto", each processed page is checked independently. Native text
+is retained and only scan-like pages are sent to Tesseract.
 
 The module also contains helper functions for OCR probing, Tesseract/ocrmypdf
 availability checks, and a small wrapper around temporary files.
@@ -152,22 +152,7 @@ def extract_pages(
         return _extract_native(pdf_path, options, progress_cb, pdf_password)
 
     if mode == "auto":
-        if _needs_ocr_probe(pdf_path, pdf_password):
-            log("[extract] Auto: scanned PDF detected.")
-            if _HAS_TESS and _HAS_PIL and _tesseract_available():
-                log("[extract] Using Tesseract OCR...")
-                return _extract_tesseract(pdf_path, options, progress_cb, pdf_password)
-            elif _which("ocrmypdf") and _tesseract_available():
-                log("[extract] Using OCRmyPDF...")
-                return _extract_ocrmypdf_then_native(pdf_path, options, progress_cb, pdf_password)
-            else:
-                log("[extract] WARNING: Scanned PDF detected but no OCR available!")
-                log("[extract] Install Tesseract from: https://github.com/UB-Mannheim/tesseract/wiki")
-                log("[extract] Then run: pip install pytesseract pillow")
-                log("[extract] Falling back to native extraction (may produce poor results).")
-                return _extract_native(pdf_path, options, progress_cb, pdf_password)
-        # Otherwise, native path
-        return _extract_native(pdf_path, options, progress_cb, pdf_password)
+        return _extract_auto(pdf_path, options, progress_cb, pdf_password)
 
     if mode == "tesseract":
         if not (_HAS_TESS and _HAS_PIL):
@@ -232,6 +217,79 @@ def _extract_native(
         doc.close()
 
 
+def _page_needs_ocr(page) -> bool:
+    """Use page coordinates, not image pixel counts, to find scan-like pages.
+
+    A short digital cover or a tiny high-resolution logo must stay native.
+    Text-heavy pages retain their native text; partially scanned text-heavy
+    pages still require explicit OCR mode.
+    """
+    if len(page.get_text("text").strip()) >= 50:
+        return False
+    area = page.rect.get_area()
+    return bool(area > 0 and any(
+        fitz.Rect(info["bbox"]).get_area() >= area * 0.3
+        for info in page.get_image_info()
+    ))
+
+
+def _validate_tesseract(options: Options) -> None:
+    if not (_HAS_TESS and _HAS_PIL and _tesseract_available()):
+        raise RuntimeError(
+            "OCR required: install Tesseract, pytesseract and Pillow. "
+            "On CachyOS: sudo pacman -S tesseract tesseract-data-spa tesseract-data-eng; "
+            "install pdfmd[ocr] in your pipx environment."
+        )
+    requested = set((options.ocr_lang or "eng").split("+"))
+    installed = set(pytesseract.get_languages(config=""))
+    missing = sorted(requested - installed)
+    if missing:
+        raise RuntimeError(
+            "Missing OCR language(s): " + ", ".join(missing)
+            + ". Check tesseract --list-langs and install the corresponding tesseract-data packages."
+        )
+
+
+def _ocr_page(page, options: Options) -> PageText:
+    dpi = 200 if options.preview_only else 300
+    pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csRGB, alpha=False)
+    with Image.open(io.BytesIO(pix.tobytes("png"))) as img:
+        data = pytesseract.image_to_data(
+            img, lang=options.ocr_lang or "eng",
+            output_type=pytesseract.Output.DICT, timeout=120,
+        )
+    return PageText.from_tesseract_data(data)
+
+
+def _extract_auto(
+    pdf_path: str, options: Options, progress_cb: DefProgress,
+    pdf_password: Optional[str] = None,
+) -> List[PageText]:
+    """Preserve native text and OCR only scan-like pages, including annexes."""
+    doc = _open_pdf_with_password(pdf_path, pdf_password)
+    try:
+        total = doc.page_count
+        if not total:
+            raise ValueError("PDF has no pages")
+        limit = min(3, total) if options.preview_only else total
+        validated = False
+        out = []
+        for i in range(limit):
+            page = doc.load_page(i)
+            if _page_needs_ocr(page):
+                if not validated:
+                    _validate_tesseract(options)
+                    validated = True
+                out.append(_ocr_page(page, options))
+            else:
+                out.append(PageText.from_pymupdf(page.get_text("dict")))
+            if progress_cb:
+                progress_cb(i + 1, limit)
+        return out
+    finally:
+        doc.close()
+
+
 # ------------------------ Tesseract-based OCR path -----------------------
 
 
@@ -242,8 +300,7 @@ def _extract_tesseract(
     pdf_password: Optional[str] = None,
 ) -> List[PageText]:
     """Render each page to an image, feed into Tesseract, build PageText."""
-    if not (_HAS_TESS and _HAS_PIL):  # pragma: no cover - guarded earlier
-        raise RuntimeError("Tesseract/Pillow not available")
+    _validate_tesseract(options)
 
     doc = _open_pdf_with_password(pdf_path, pdf_password)
     try:
@@ -255,27 +312,8 @@ def _extract_tesseract(
         limit = total if not options.preview_only else min(3, total)
         out: List[PageText] = []
 
-        # Use 200 DPI for preview mode to save memory/time, 300 for full quality
-        dpi = 200 if options.preview_only else 300
-
         for i in range(limit):
-            page = doc.load_page(i)
-
-            # Render at higher DPI for better OCR
-            pix = page.get_pixmap(dpi=dpi)
-            if not hasattr(pix, "tobytes"):
-                raise RuntimeError("Unexpected: pixmap missing tobytes()")
-
-            png_bytes = pix.tobytes("png")
-            img = Image.open(io.BytesIO(png_bytes))
-
-            # Let pytesseract detect layout at word/line level
-            data = pytesseract.image_to_data(
-                img,
-                lang=options.ocr_lang or "eng",
-                output_type=pytesseract.Output.DICT,
-            )
-            out.append(PageText.from_tesseract_data(data))
+            out.append(_ocr_page(doc.load_page(i), options))
 
             if progress_cb:
                 progress_cb(i + 1, total)
@@ -376,44 +414,10 @@ def _needs_ocr_probe(
         if doc.page_count == 0:
             return False
 
-        total = min(pages_to_check, doc.page_count)
-        text_chars = 0
-        scanned_indicators = 0
-
-        for i in range(total):
-            page = doc.load_page(i)
-            text = page.get_text("text").strip()
-            text_chars += len(text)
-
-            # Get page dimensions
-            rect = page.rect
-            page_area = rect.width * rect.height
-
-            # Check for images
-            images = page.get_images(full=True)
-            if images:
-                for img_info in images:
-                    try:
-                        xref = img_info[0]
-                        pix = fitz.Pixmap(doc, xref)
-                        img_area = pix.width * pix.height
-                        pix = None  # free resources
-                        # If image covers a large portion of the page, count it
-                        if img_area > 0.3 * page_area:
-                            scanned_indicators += 1
-                    except Exception:
-                        continue
-
-        # Very low text and presence of large images suggests scanned
-        if text_chars < 100 and scanned_indicators > 0:
-            return True
-
-        # Also treat very low text density as scanned
-        avg_text_per_page = text_chars / max(total, 1)
-        if avg_text_per_page < 50 and scanned_indicators > 0:
-            return True
-
-        return False
+        return any(
+            _page_needs_ocr(doc.load_page(i))
+            for i in range(min(pages_to_check, doc.page_count))
+        )
     finally:
         doc.close()
 

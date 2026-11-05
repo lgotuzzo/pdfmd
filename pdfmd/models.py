@@ -108,14 +108,15 @@ class PageText:
             return PageText()
 
         # Group indices by (block_num, line_num)
-        groups: Dict[tuple[int, int], List[int]] = {}
+        groups: Dict[tuple[int, int, int], List[int]] = {}
         for i in range(n):
             txt = data["text"][i] or ""
             if not txt.strip():
                 continue
             bno = int(data.get("block_num", [0]*n)[i] or 0)
             lno = int(data.get("line_num", [0]*n)[i] or 0)
-            groups.setdefault((bno, lno), []).append(i)
+            pno = int(data.get("par_num", [0]*n)[i] or 0)
+            groups.setdefault((bno, pno, lno), []).append(i)
 
         # Sort groups by block, then line order (by top coordinate if present)
         def group_top(idx_list: List[int]) -> int:
@@ -128,14 +129,15 @@ class PageText:
         cur_block_key: Optional[int] = None
         cur_block_lines: List[Line] = []
 
-        for (bno, lno) in ordered_keys:
-            idxs = groups[(bno, lno)]
+        for (bno, pno, lno) in ordered_keys:
+            idxs = groups[(bno, pno, lno)]
             # estimate size by median of heights in this line
             heights = [int(data.get("height", [0]*n)[i] or 0) for i in idxs]
             size_est = float(median_safe(heights)) if heights else 0.0
             # assemble spans in reading order (left coordinate if present)
             idxs_sorted = sorted(idxs, key=lambda i: int(data.get("left", [0]*n)[i] or 0))
-            spans = [Span(text=str(data["text"][i]), size=size_est) for i in idxs_sorted]
+            spans = [Span(text=(" " if j else "") + str(data["text"][i]).strip(), size=size_est)
+                     for j, i in enumerate(idxs_sorted)]
             line = Line(spans=spans)
 
             if cur_block_key is None:
@@ -173,6 +175,8 @@ class Options:
     # Rendering / output
     insert_page_breaks: bool = False
     export_images: bool = False
+    overwrite_existing: bool = False
+    insert_page_numbers: bool = False
 
 
 # ------------------------------ Utilities ------------------------------

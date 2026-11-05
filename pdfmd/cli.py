@@ -135,9 +135,23 @@ Security notes:
     )
 
     parser.add_argument(
+        "--profile", choices=["es"],
+        help="Spanish preset: auto OCR, spa+eng, page breaks and page references.",
+    )
+    parser.add_argument(
+        "--page-numbers", action="store_true",
+        help="Insert searchable <!-- pdfmd:page=N --> source-page comments.",
+    )
+
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Explicitly replace existing Markdown and exported image files.",
+    )
+
+    parser.add_argument(
         "--ocr",
         choices=["off", "auto", "tesseract", "ocrmypdf"],
-        default="off",
+        default=None,
         help=(
             "OCR mode (default: off):\n"
             "  off        — use native text only\n"
@@ -149,7 +163,7 @@ Security notes:
 
     parser.add_argument(
         "--lang",
-        default="eng",
+        default=None,
         help=(
             "Tesseract language code(s) for OCR (default: eng).\n"
             "Use a Tesseract language code, e.g. 'deu' for German,\n"
@@ -231,13 +245,16 @@ def _make_options(args: argparse.Namespace) -> Options:
     opts = Options()
 
     # Extraction / OCR
-    opts.ocr_mode = args.ocr
-    opts.ocr_lang = args.lang or "eng"
+    spanish = args.profile == "es"
+    opts.ocr_mode = args.ocr if args.ocr is not None else ("auto" if spanish else "off")
+    opts.ocr_lang = args.lang or ("spa+eng" if spanish else "eng")
     opts.preview_only = bool(args.preview_only)
 
     # Rendering / output
-    opts.insert_page_breaks = bool(args.page_breaks)
+    opts.insert_page_breaks = bool(args.page_breaks or spanish)
+    opts.insert_page_numbers = bool(args.page_numbers or spanish)
     opts.export_images = bool(args.export_images)
+    opts.overwrite_existing = bool(args.overwrite)
 
     # Transform heuristics remain at their defaults; they can be exposed later.
     return opts
@@ -398,7 +415,7 @@ def _run_single(
 
     # Decide logging callback based on verbosity / quiet
     if args.quiet:
-        log_cb: Optional[Callable[[str], None]] = None
+        log_cb: Optional[Callable[[str], None]] = lambda _msg: None
     elif args.verbose >= 1:
         def log_cb(msg: str) -> None:
             sys.stderr.write(f"{colors.info}{msg}{colors.reset}\n")
@@ -435,22 +452,22 @@ def _run_single(
             "cannot decrypt",
             "encrypted",
         ]
-        needs_password = any(kw in lower for kw in password_keywords)
+        needs_password = isinstance(exc, RuntimeError) and any(
+            lower.startswith(kw) for kw in password_keywords if kw != "encrypted"
+        )
 
         if not needs_password:
-            if not args.quiet:
-                sys.stderr.write(f"{colors.err}Error:{colors.reset} {exc}\n")
-                if args.verbose >= 2:
-                    traceback.print_exc(file=sys.stderr)
+            sys.stderr.write(f"{colors.err}Error:{colors.reset} {exc}\n")
+            if args.verbose >= 2:
+                traceback.print_exc(file=sys.stderr)
             return False
 
         # Encrypted PDF, interactive password prompt required.
         if not sys.stdin.isatty():
-            if not args.quiet:
-                sys.stderr.write(
-                    f"{colors.err}Error:{colors.reset} "
-                    "PDF is password protected and interactive input is not available.\n"
-                )
+            sys.stderr.write(
+                f"{colors.err}Error:{colors.reset} "
+                "PDF is password protected and interactive input is not available.\n"
+            )
             return False
 
         try:
@@ -458,29 +475,20 @@ def _run_single(
                 "PDF is password protected. Enter password (input will be hidden): "
             )
         except Exception as e_input:
-            if not args.quiet:
-                sys.stderr.write(
-                    f"{colors.err}Error reading password:{colors.reset} {e_input}\n"
-                )
+            sys.stderr.write(f"{colors.err}Error reading password:{colors.reset} {e_input}\n")
             return False
 
         if not password:
-            if not args.quiet:
-                sys.stderr.write(
-                    f"{colors.warn}No password provided; skipping file.{colors.reset}\n"
-                )
+            sys.stderr.write(f"{colors.warn}No password provided; skipping file.{colors.reset}\n")
             return False
 
         try:
             run_once(password)
             return True
         except Exception as exc2:
-            if not args.quiet:
-                sys.stderr.write(
-                    f"{colors.err}Error after password attempt:{colors.reset} {exc2}\n"
-                )
-                if args.verbose >= 2:
-                    traceback.print_exc(file=sys.stderr)
+            sys.stderr.write(f"{colors.err}Error after password attempt:{colors.reset} {exc2}\n")
+            if args.verbose >= 2:
+                traceback.print_exc(file=sys.stderr)
             return False
 
     finally:
@@ -525,6 +533,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Prepare inputs
     inputs: List[Path] = [Path(p).expanduser() for p in args.inputs]
 
+    if args.output == "-" and (len(inputs) != 1 or args.export_images or args.stats):
+        sys.stderr.write("Error: stdout requires one PDF and does not support --export-images or --stats.\n")
+        return 1
+
     # Interpret output argument
     out_arg = Path(args.output).expanduser() if args.output else None
     multiple = len(inputs) > 1
@@ -545,25 +557,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             return 1
 
+    # Map destinations before conversion: --overwrite authorizes replacement
+    # from earlier runs, never discarding another input from this same batch.
+    destinations = []
+    for inp in inputs:
+        if args.output == "-":
+            outp = Path("-")
+        elif out_arg is None:
+            outp = inp.with_suffix(".md")
+        elif multiple or out_arg.is_dir():
+            outp = out_arg / (inp.stem + ".md")
+        else:
+            outp = out_arg
+        destinations.append(outp)
+    seen = set()
+    for outp in destinations:
+        key = outp.resolve()
+        if key in seen:
+            sys.stderr.write(f"Error: multiple inputs map to the same output: {outp}\n")
+            return 1
+        seen.add(key)
+
     successes = 0
     failures = 0
 
-    for inp in inputs:
+    for inp, outp in zip(inputs, destinations):
         if not inp.is_file():
-            if not args.quiet:
-                sys.stderr.write(
-                    f"{colors.err}Error:{colors.reset} input file not found: {inp}\n"
-                )
+            sys.stderr.write(
+                f"{colors.err}Error:{colors.reset} input file not found: {inp}\n"
+            )
             failures += 1
             continue
-
-        if out_arg is None:
-            outp = inp.with_suffix(".md")
-        else:
-            if multiple or out_arg.is_dir():
-                outp = out_arg / (inp.stem + ".md")
-            else:
-                outp = out_arg
 
         ok = _run_single(inp, outp, opts, args, colors)
 

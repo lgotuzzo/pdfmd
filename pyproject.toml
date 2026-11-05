@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdfmd"
-version = "1.6.1"
+version = "1.7.0"
 description = "Fast, local, privacy-first PDF to Markdown converter with OCR, multi-language support, table detection, and math preservation"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -77,11 +77,16 @@ dev = [
 
 [project.scripts]
 pdfmd = "pdfmd.cli:main"
+pdfmd-kde = "pdfmd.kde:main"
+
+[project.gui-scripts]
+pdfmd-gui = "pdfmd.desktop:gui_main"
+pdfmd-desktop = "pdfmd.desktop:main"
 
 [project.urls]
-Homepage = "https://github.com/M1ck4/pdfmd"
-Repository = "https://github.com/M1ck4/pdfmd"
-"Bug Tracker" = "https://github.com/M1ck4/pdfmd/issues"
+Homepage = "https://github.com/lgotuzzo/pdfmd"
+Repository = "https://github.com/lgotuzzo/pdfmd"
+"Bug Tracker" = "https://github.com/lgotuzzo/pdfmd/issues"
 
 [tool.setuptools]
 packages = ["pdfmd"]

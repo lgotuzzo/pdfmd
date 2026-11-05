@@ -157,3 +157,6 @@ tmp/
 
 # Unused code snippets
 *_dead_ends/
+# Keep maintained documentation while ignoring converted user documents
+!doc/*.md
+!docs/**/*.md
